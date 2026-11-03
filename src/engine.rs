@@ -57,6 +57,7 @@ pub struct Engine<C: Clock> {
     executions: std::collections::HashMap<String, u64>,
     global_cooldowns: std::collections::HashMap<String, u64>,
     user_cooldowns: std::collections::HashMap<(String, Platform, String), u64>,
+    mod_trackers: std::collections::HashMap<(Platform, String), Vec<(String, u64)>>,
 }
 
 impl<C: Clock> Engine<C> {
@@ -67,6 +68,7 @@ impl<C: Clock> Engine<C> {
             executions: std::collections::HashMap::new(),
             global_cooldowns: std::collections::HashMap::new(),
             user_cooldowns: std::collections::HashMap::new(),
+            mod_trackers: std::collections::HashMap::new(),
         }
     }
 
@@ -140,6 +142,7 @@ impl<C: Clock> Engine<C> {
                 out,
             )?;
             self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
+            self.track_mod(&rule, &command, args, &event, out)?;
         }
         Ok(())
     }
@@ -214,6 +217,70 @@ impl<C: Clock> Engine<C> {
         )
     }
 
+    fn track_mod(
+        &mut self,
+        rule: &crate::model::ModAction,
+        command: &str,
+        args: &str,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let Some(combo) = &rule.combo else {
+            return Ok(());
+        };
+        let now = self.clock.now_ms();
+        let tracker = self
+            .mod_trackers
+            .entry((event.platform, rule.name.clone()))
+            .or_default();
+        prune_mods(tracker, now, combo.window_ms);
+        if !tracker.iter().any(|(id, _)| id == &event.user.id) {
+            tracker.push((event.user.id.clone(), now));
+        }
+        if tracker.len() < combo.threshold as usize {
+            return Ok(());
+        }
+        let count = tracker.len() as u64;
+        let context = ExecutionContext {
+            source: "mod_action".into(),
+            rule: rule.name.clone(),
+            command: command.into(),
+            args: args.into(),
+            count,
+            platform: event.platform,
+            user: event.user.clone(),
+        };
+        let presentation = crate::model::ComboPresentation {
+            schema: 1,
+            kind: "moderators".into(),
+            rule: rule.name.clone(),
+            key: rule.name.clone(),
+            count,
+            threshold: combo.threshold,
+            text: combo
+                .effect
+                .text
+                .as_ref()
+                .map(|text| render(text, &context, None)),
+            image: self
+                .loaded
+                .assets
+                .public_url("image", combo.effect.image.as_deref())?,
+            sound: self
+                .loaded
+                .assets
+                .public_url("sound", combo.effect.sound.as_deref())?,
+            variant: combo.effect.variant.clone(),
+            duration_ms: combo
+                .effect
+                .duration_ms
+                .unwrap_or(self.loaded.host.default_duration_ms),
+        };
+        crate::protocol::write_combo(out, &presentation, &event.user)?;
+        tracker.clear();
+        Ok(())
+    }
+
     fn next_count(&mut self, rule: &str) -> u64 {
         let count = self.executions.entry(rule.into()).or_default();
         *count = count.saturating_add(1);
@@ -239,6 +306,10 @@ impl<C: Clock> Engine<C> {
         emit_actions(actions.emits, &context, out)?;
         Ok(())
     }
+}
+
+pub fn prune_mods(entries: &mut Vec<(String, u64)>, now: u64, window_ms: u64) {
+    entries.retain(|(_, at)| now.saturating_sub(*at) < window_ms);
 }
 
 pub fn parse_command(message: &str) -> Option<(String, &str)> {
