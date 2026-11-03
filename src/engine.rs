@@ -43,6 +43,14 @@ impl From<io::Error> for EngineError {
     }
 }
 
+struct ActionRequest<'a> {
+    source: &'a str,
+    rule: &'a str,
+    command: &'a str,
+    args: &'a str,
+    actions: ActionSet<'a>,
+}
+
 pub struct Engine<C: Clock> {
     loaded: Loaded,
     clock: C,
@@ -72,60 +80,98 @@ impl<C: Clock> Engine<C> {
         let Some((command, args)) = parse_command(message) else {
             return Ok(());
         };
-        let Some(rule) = self.find_command(&command) else {
-            return Ok(());
-        };
-        if !platform_allowed(&rule.platforms, event.platform)
-            || !role_allowed(&rule.roles, &event.user)
-            || !self.cooldown_allowed(&rule, &event)
-        {
+        if let Some(rule) = self.find_command(&command) {
+            if !platform_allowed(&rule.platforms, event.platform)
+                || !role_allowed(&rule.roles, &event.user)
+                || !self.cooldown_allowed(
+                    &rule.name,
+                    rule.global_cooldown_ms,
+                    rule.user_cooldown_ms,
+                    &event,
+                )
+            {
+                return Ok(());
+            }
+            self.run_actions(
+                ActionRequest {
+                    source: "command",
+                    rule: &rule.name,
+                    command: &command,
+                    args,
+                    actions: ActionSet {
+                        steps: &rule.steps,
+                        emits: &rule.emits,
+                    },
+                },
+                &event,
+                out,
+            )?;
+            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
             return Ok(());
         }
-        let count = self.next_count(&rule.name);
-        let context = ExecutionContext {
-            source: "command".into(),
-            rule: rule.name.clone(),
-            command,
-            args: args.into(),
-            count,
-            platform: event.platform,
-            user: event.user,
-        };
-        let actions = ActionSet {
-            steps: &rule.steps,
-            emits: &rule.emits,
-        };
-        let user_id = context.user.id.clone();
-        self.execute(actions, context, out)?;
-        self.record_cooldown(&rule, event.platform, user_id);
+        if let Some(rule) = self.find_mod(&command) {
+            let roles = [
+                crate::model::Role::Moderator,
+                crate::model::Role::Broadcaster,
+            ];
+            if !platform_allowed(&rule.platforms, event.platform)
+                || !role_allowed(&roles, &event.user)
+                || !self.cooldown_allowed(
+                    &rule.name,
+                    rule.global_cooldown_ms,
+                    rule.user_cooldown_ms,
+                    &event,
+                )
+            {
+                return Ok(());
+            }
+            self.run_actions(
+                ActionRequest {
+                    source: "mod_action",
+                    rule: &rule.name,
+                    command: &command,
+                    args,
+                    actions: ActionSet {
+                        steps: &rule.steps,
+                        emits: &rule.emits,
+                    },
+                },
+                &event,
+                out,
+            )?;
+            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
+        }
         Ok(())
     }
 
-    fn cooldown_allowed(&mut self, rule: &CommandRule, event: &InputEvent) -> bool {
+    fn cooldown_allowed(
+        &mut self,
+        name: &str,
+        global_ms: u64,
+        user_ms: u64,
+        event: &InputEvent,
+    ) -> bool {
         let now = self.clock.now_ms();
-        self.global_cooldowns.retain(|name, at| {
-            name != &rule.name || now.saturating_sub(*at) < rule.global_cooldown_ms
-        });
-        self.user_cooldowns.retain(|(name, _, _), at| {
-            name != &rule.name || now.saturating_sub(*at) < rule.user_cooldown_ms
-        });
-        let global = self.global_cooldowns.get(&rule.name).is_some_and(|at| {
-            rule.global_cooldown_ms > 0 && now.saturating_sub(*at) < rule.global_cooldown_ms
-        });
+        self.global_cooldowns
+            .retain(|key, at| key != name || now.saturating_sub(*at) < global_ms);
+        self.user_cooldowns
+            .retain(|(key, _, _), at| key != name || now.saturating_sub(*at) < user_ms);
+        let global = self
+            .global_cooldowns
+            .get(name)
+            .is_some_and(|at| global_ms > 0 && now.saturating_sub(*at) < global_ms);
         let user = self
             .user_cooldowns
-            .get(&(rule.name.clone(), event.platform, event.user.id.clone()))
-            .is_some_and(|at| {
-                rule.user_cooldown_ms > 0 && now.saturating_sub(*at) < rule.user_cooldown_ms
-            });
+            .get(&(name.into(), event.platform, event.user.id.clone()))
+            .is_some_and(|at| user_ms > 0 && now.saturating_sub(*at) < user_ms);
         !global && !user
     }
 
-    fn record_cooldown(&mut self, rule: &CommandRule, platform: Platform, user_id: String) {
+    fn record_cooldown(&mut self, name: &str, platform: Platform, user_id: String) {
         let now = self.clock.now_ms();
-        self.global_cooldowns.insert(rule.name.clone(), now);
+        self.global_cooldowns.insert(name.into(), now);
         self.user_cooldowns
-            .insert((rule.name.clone(), platform, user_id), now);
+            .insert((name.into(), platform, user_id), now);
     }
 
     fn find_command(&self, command: &str) -> Option<CommandRule> {
@@ -135,6 +181,37 @@ impl<C: Clock> Engine<C> {
             .iter()
             .find(|rule| rule.name == command || rule.aliases.iter().any(|alias| alias == command))
             .cloned()
+    }
+
+    fn find_mod(&self, command: &str) -> Option<crate::model::ModAction> {
+        self.loaded
+            .rules
+            .mod_actions
+            .iter()
+            .find(|rule| rule.name == command || rule.aliases.iter().any(|alias| alias == command))
+            .cloned()
+    }
+
+    fn run_actions(
+        &mut self,
+        request: ActionRequest<'_>,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let count = self.next_count(request.rule);
+        self.execute(
+            request.actions,
+            ExecutionContext {
+                source: request.source.into(),
+                rule: request.rule.into(),
+                command: request.command.into(),
+                args: request.args.into(),
+                count,
+                platform: event.platform,
+                user: event.user.clone(),
+            },
+            out,
+        )
     }
 
     fn next_count(&mut self, rule: &str) -> u64 {
