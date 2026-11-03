@@ -1,3 +1,5 @@
+pub mod model;
+
 use std::{error::Error, io, path::PathBuf};
 
 use serde::Deserialize;
