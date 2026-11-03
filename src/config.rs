@@ -140,11 +140,7 @@ fn validate(rules: &Rules, path: &Path) -> Result<(), ConfigError> {
         effect(path, &combo.name, &combo.effect, &["key"])?;
     }
     for counter in &rules.counters {
-        for name in [
-            &counter.name,
-            &counter.show_command,
-            &counter.increment_command,
-        ] {
+        for name in [&counter.show_command, &counter.increment_command] {
             register(path, &mut names, name)?;
         }
         if let Some(name) = &counter.decrement_command {
@@ -342,4 +338,122 @@ fn valid_name(value: &str, plus: bool) -> bool {
         && chars.all(|c| {
             c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' || plus && c == '+'
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn load_rules(toml: &str) -> Result<Loaded, ConfigError> {
+        let root = std::env::temp_dir().join(format!(
+            "interactions-config-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir_all(root.join("overlay/assets")).unwrap();
+        fs::write(root.join("config/interactions.toml"), toml).unwrap();
+        let init = Init {
+            event_type: "init".into(),
+            config: HostConfig::default(),
+            data_dir: root.join("data"),
+        };
+        load(&init, &root)
+    }
+
+    #[test]
+    fn minimal_rule_loads() {
+        let loaded =
+            load_rules("[[commands]]\nname='hola'\n[[commands.steps]]\ntext='Hola'").unwrap();
+        assert_eq!(loaded.rules.commands[0].name, "hola");
+    }
+
+    #[test]
+    fn duplicate_alias_across_rule_kinds_fails() {
+        let error = load_rules(
+            r#"
+            [[commands]]
+            name = "hola"
+            aliases = ["saludo"]
+            [[commands.steps]]
+            text = "Hola"
+            [[mod_actions]]
+            name = "saludo"
+            [[mod_actions.steps]]
+            text = "Hola"
+            "#,
+        )
+        .err()
+        .unwrap();
+        assert!(error.reason().contains("duplicado"));
+    }
+
+    #[test]
+    fn invalid_roles_and_empty_platforms_fail() {
+        let everyone = load_rules(
+            "[[commands]]\nname='x'\nroles=['everyone','vip']\n[[commands.steps]]\ntext='x'",
+        );
+        assert!(everyone.is_err());
+        let invalid =
+            load_rules("[[commands]]\nname='x'\nroles=['mod']\n[[commands.steps]]\ntext='x'");
+        assert!(invalid.is_err());
+        let empty =
+            load_rules("[[commands]]\nname='x'\nplatforms=[]\n[[commands.steps]]\ntext='x'");
+        assert!(empty.is_err());
+    }
+
+    #[test]
+    fn placeholders_are_contextual_and_balanced() {
+        for text in ["{unknown}", "{key}", "{user", "{user}}"] {
+            let source = format!("[[commands]]\nname='x'\n[[commands.steps]]\ntext='{text}'");
+            assert!(load_rules(&source).is_err(), "accepted {text}");
+        }
+        let combo = load_rules(
+            "[[chat_combos]]\nname='x'\nthreshold=2\nwindow_ms=1000\ntext='{key} {count}'",
+        );
+        assert!(combo.is_ok());
+        let counter = load_rules(
+            "[[counters]]\nname='n'\nshow_command='n'\nincrement_command='n+'\ninitial=0\ntext='{name}: {value}'",
+        );
+        assert!(counter.is_ok());
+    }
+
+    #[test]
+    fn rule_limits_are_enforced() {
+        for source in [
+            "[[chat_combos]]\nname='x'\nthreshold=1\nwindow_ms=1000\ntext='x'",
+            "[[chat_combos]]\nname='x'\nthreshold=2\nwindow_ms=99\ntext='x'",
+            "[[chat_combos]]\nname='x'\nthreshold=2\nwindow_ms=1000\nmin_token_length=65\ntext='x'",
+            "[[commands]]\nname='x'\n[[commands.steps]]\ntext='x'\nduration_ms=99",
+            "[[counters]]\nname='n'\nshow_command='n'\nincrement_command='n+'\ninitial=11\nmin=0\nmax=10\ntext='x'",
+        ] {
+            assert!(load_rules(source).is_err(), "accepted {source}");
+        }
+    }
+
+    #[test]
+    fn triggers_require_filters_and_valid_amounts() {
+        let redemption = load_rules(
+            "[[event_triggers]]\nname='r'\nevent='redemption'\n[[event_triggers.steps]]\ntext='x'",
+        );
+        assert!(redemption.is_err());
+        let donation = load_rules(
+            "[[event_triggers]]\nname='d'\nevent='donation'\nmin_amount=10.0\nmax_amount=1.0\n[[event_triggers.steps]]\ntext='x'",
+        );
+        assert!(donation.is_err());
+    }
+
+    #[test]
+    fn free_event_names_and_variants_are_restricted() {
+        let emit = load_rules("[[commands]]\nname='x'\n[[commands.emits]]\nname='Bad Event'");
+        assert!(emit.is_err());
+        let variant = load_rules(
+            "[[commands]]\nname='x'\n[[commands.steps]]\ntext='x'\nvariant='bad_variant'",
+        );
+        assert!(variant.is_err());
+    }
 }
