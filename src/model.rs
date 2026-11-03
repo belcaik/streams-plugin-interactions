@@ -334,3 +334,85 @@ fn default_variant() -> String {
 fn empty_payload() -> Value {
     Value::Object(Map::new())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_config_defaults_match_manifest() {
+        let config: HostConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, HostConfig::default());
+    }
+
+    #[test]
+    fn command_defaults_are_applied() {
+        let rules: Rules = toml::from_str(
+            r#"
+            [[commands]]
+            name = "hola"
+            [[commands.steps]]
+            text = "Hola"
+            "#,
+        )
+        .unwrap();
+        let command = &rules.commands[0];
+        assert_eq!(command.roles, [Role::Everyone]);
+        assert_eq!(
+            command.platforms,
+            [Platform::Twitch, Platform::Kick, Platform::Youtube]
+        );
+        assert_eq!(command.global_cooldown_ms, 0);
+        assert_eq!(command.user_cooldown_ms, 0);
+        assert!(command.aliases.is_empty());
+        assert_eq!(command.steps[0].variant, "default");
+    }
+
+    #[test]
+    fn complete_example_deserializes_every_rule() {
+        let rules: Rules = toml::from_str(include_str!("../config/interactions.toml")).unwrap();
+        assert_eq!(rules.commands.len(), 2);
+        assert_eq!(rules.mod_actions.len(), 3);
+        assert_eq!(rules.chat_combos.len(), 1);
+        assert_eq!(rules.counters.len(), 1);
+        assert_eq!(rules.event_triggers.len(), 2);
+        assert_eq!(rules.commands[1].emits[0].name, "camera_move");
+        assert_eq!(rules.mod_actions[0].combo.as_ref().unwrap().threshold, 3);
+        assert_eq!(rules.counters[0].min, 0);
+    }
+
+    #[test]
+    fn optional_rule_defaults_are_applied() {
+        let rules: Rules = toml::from_str(
+            r#"
+            [[counters]]
+            name = "n"
+            show_command = "n"
+            increment_command = "n+"
+            initial = 0
+            text = "{value}"
+
+            [[event_triggers]]
+            name = "donacion"
+            event = "donation"
+            [[event_triggers.steps]]
+            text = "Gracias"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(rules.counters[0].min, i64::MIN);
+        assert_eq!(rules.counters[0].max, i64::MAX);
+        assert_eq!(
+            rules.counters[0].mutation_roles,
+            [Role::Moderator, Role::Broadcaster]
+        );
+        assert!(rules.event_triggers[0].enabled);
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        assert!(toml::from_str::<Rules>("unknown = true").is_err());
+        assert!(toml::from_str::<Rules>("[[commands]]\nname = 'hola'\nunknown = true").is_err());
+        assert!(serde_json::from_str::<HostConfig>(r#"{"unknown":true}"#).is_err());
+    }
+}
