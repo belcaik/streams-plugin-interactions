@@ -1,0 +1,120 @@
+# Reinicia streams-tools después de editar este archivo.
+
+[[commands]]
+name = "hola"
+aliases = ["hello", "hi"]
+roles = ["everyone"]
+platforms = ["twitch", "kick", "youtube"]
+global_cooldown_ms = 1000
+user_cooldown_ms = 10000
+
+[[commands.steps]]
+text = "¡Hola, {user}! {args}"
+variant = "default"
+duration_ms = 3000
+
+[[commands]]
+name = "camara"
+roles = ["moderator", "broadcaster"]
+platforms = ["twitch", "kick", "youtube"]
+global_cooldown_ms = 2000
+user_cooldown_ms = 5000
+
+[[commands.emits]]
+name = "camera_move"
+payload = { preset = "desk" }
+
+[[mod_actions]]
+name = "hype"
+aliases = []
+platforms = ["twitch", "kick", "youtube"]
+global_cooldown_ms = 0
+user_cooldown_ms = 0
+
+[[mod_actions.steps]]
+text = "¡HYPE de {user}!"
+image = "hype.svg"
+variant = "fullscreen"
+duration_ms = 4000
+
+[mod_actions.combo]
+threshold = 3
+window_ms = 8000
+text = "x{count} MOD HYPE"
+image = "hype.svg"
+variant = "fullscreen"
+duration_ms = 5000
+
+[[mod_actions]]
+name = "shoutout"
+aliases = ["so"]
+platforms = ["twitch", "kick", "youtube"]
+global_cooldown_ms = 5000
+user_cooldown_ms = 5000
+
+[[mod_actions.steps]]
+text = "¡Visiten a {target}!"
+variant = "default"
+duration_ms = 5000
+
+[[mod_actions]]
+name = "countdown"
+aliases = []
+platforms = ["twitch", "kick", "youtube"]
+global_cooldown_ms = 1000
+user_cooldown_ms = 1000
+
+[[mod_actions.steps]]
+text = "Cuenta atrás: {args}"
+variant = "fullscreen"
+duration_ms = 5000
+
+[[chat_combos]]
+name = "chat-combo"
+platforms = ["twitch", "kick", "youtube"]
+threshold = 5
+window_ms = 10000
+case_sensitive = false
+min_token_length = 2
+ignore_prefixes = ["!"]
+text = "x{count} {key}"
+variant = "combo"
+duration_ms = 2500
+
+[[counters]]
+name = "muertes"
+show_command = "muertes"
+increment_command = "muertes+"
+decrement_command = "muertes-"
+initial = 0
+min = 0
+max = 999999
+mutation_roles = ["moderator", "broadcaster"]
+text = "Muertes: {value}"
+variant = "counter"
+duration_ms = 3500
+
+[[event_triggers]]
+name = "twitch-hype"
+enabled = false
+event = "redemption"
+platforms = ["twitch"]
+reward_title = "Hype"
+
+[[event_triggers.steps]]
+text = "{user} activó Hype: {args}"
+image = "hype.svg"
+variant = "fullscreen"
+duration_ms = 5000
+
+[[event_triggers]]
+name = "big-donation"
+enabled = false
+event = "donation"
+platforms = ["twitch", "youtube"]
+min_amount = 10.0
+
+[[event_triggers.steps]]
+text = "¡Gracias, {user}! {args}"
+variant = "fullscreen"
+duration_ms = 5000
