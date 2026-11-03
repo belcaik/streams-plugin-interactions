@@ -55,3 +55,16 @@ impl Clock for ManualClock {
         self.now.get()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_clock_sets_and_advances_without_sleeping() {
+        let clock = ManualClock::new(10);
+        clock.advance(5);
+        clock.set(30);
+        assert_eq!(clock.now_ms(), 30);
+    }
+}
