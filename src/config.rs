@@ -530,4 +530,58 @@ mod tests {
         );
         assert!(variant.is_err());
     }
+
+    #[test]
+    fn public_url_accepts_only_existing_regular_files() {
+        let loaded = load_rules("").unwrap();
+        fs::write(loaded.assets.root.join("hype.svg"), "svg").unwrap();
+        assert_eq!(
+            loaded.assets.public_url("image", Some("hype.svg")).unwrap(),
+            Some("./assets/hype.svg".into())
+        );
+        assert!(
+            loaded
+                .assets
+                .public_url("image", Some("missing.svg"))
+                .is_err()
+        );
+        assert!(loaded.assets.public_url("image", Some(".")).is_err());
+    }
+
+    #[test]
+    fn asset_paths_reject_traversal_absolute_and_non_portable_text() {
+        let loaded = load_rules("").unwrap();
+        for path in [
+            "../secret",
+            "/tmp/file",
+            "a//b",
+            "./a",
+            "a\\b",
+            "imagen.png",
+        ] {
+            assert!(
+                loaded.assets.public_url("image", Some(path)).is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_asset_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let loaded = load_rules("").unwrap();
+        let outside = loaded.assets.root.with_extension("outside");
+        fs::write(&outside, "secret").unwrap();
+        symlink(&outside, loaded.assets.root.join("escape")).unwrap();
+        assert!(loaded.assets.public_url("image", Some("escape")).is_err());
+    }
+
+    #[test]
+    fn configured_assets_are_preloaded() {
+        let loaded =
+            load_rules("[[commands]]\nname='x'\n[[commands.steps]]\ntext='x'\nimage='missing.svg'");
+        assert!(loaded.is_err());
+    }
 }
