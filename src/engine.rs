@@ -530,4 +530,41 @@ mod tests {
             &subscriber.user
         ));
     }
+
+    #[test]
+    fn mod_combo_counts_unique_users_and_resets() {
+        let mut engine = engine(
+            "[[mod_actions]]\nname='hype'\n[[mod_actions.steps]]\ntext='{user}'\n[mod_actions.combo]\nthreshold=3\nwindow_ms=1000\ntext='x{count}'",
+        );
+        let moderator = |id: &str| {
+            let mut event = chat("!hype", &["moderator"]);
+            event.user.id = id.into();
+            event
+        };
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("b")).len(), 1);
+        let triggered = output(&mut engine, moderator("c"));
+        assert_eq!(triggered[1]["data"]["text"], "x3");
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("b")).len(), 1);
+    }
+
+    #[test]
+    fn mod_combo_expires_and_does_not_mix_platforms() {
+        let mut engine = engine(
+            "[[mod_actions]]\nname='hype'\n[[mod_actions.steps]]\ntext='x'\n[mod_actions.combo]\nthreshold=2\nwindow_ms=1000\ntext='x{count}'",
+        );
+        let mut first = chat("!hype", &["broadcaster"]);
+        first.user.id = "a".into();
+        assert_eq!(output(&mut engine, first).len(), 1);
+        let mut second = chat("!hype", &["moderator"]);
+        second.user.id = "b".into();
+        second.platform = Platform::Kick;
+        assert_eq!(output(&mut engine, second).len(), 1);
+        engine.clock.advance(1001);
+        let mut third = chat("!hype", &["moderator"]);
+        third.user.id = "c".into();
+        assert_eq!(output(&mut engine, third).len(), 1);
+    }
 }
