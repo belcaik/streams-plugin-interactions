@@ -62,13 +62,50 @@ pub struct AssetRoot {
 }
 
 impl AssetRoot {
+    fn new(root: &Path, asset_url: String) -> Result<Self, ConfigError> {
+        let canonical = root.canonicalize().map_err(|error| {
+            ConfigError::new(
+                root,
+                "assets_dir",
+                format!("no se puede canonicalizar: {error}"),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(ConfigError::new(root, "assets_dir", "no es un directorio"));
+        }
+        Ok(Self {
+            root: canonical,
+            asset_url,
+        })
+    }
+
     pub fn public_url(
         &self,
         field: &str,
         value: Option<&str>,
     ) -> Result<Option<String>, ConfigError> {
-        let _ = (&self.root, field);
-        Ok(value.map(|path| format!("{}{path}", self.asset_url)))
+        let Some(relative) = value else {
+            return Ok(None);
+        };
+        if !valid_asset(relative) {
+            return Err(ConfigError::new(
+                &self.root,
+                field,
+                "ruta de asset inválida",
+            ));
+        }
+        let candidate = self.root.join(relative);
+        let canonical = candidate.canonicalize().map_err(|error| {
+            ConfigError::new(&self.root, field, format!("asset inexistente: {error}"))
+        })?;
+        if !canonical.starts_with(&self.root) || !canonical.is_file() {
+            return Err(ConfigError::new(
+                &self.root,
+                field,
+                "asset fuera de la raíz o no regular",
+            ));
+        }
+        Ok(Some(format!("{}{relative}", self.asset_url)))
     }
 }
 
@@ -86,14 +123,51 @@ pub fn load(init: &Init, plugin_root: &Path) -> Result<Loaded, ConfigError> {
             "debe usar ./assets/ y terminar en /",
         ));
     }
+    let assets = AssetRoot::new(
+        &plugin_root.join(&init.config.assets_dir),
+        init.config.asset_url.clone(),
+    )?;
+    preload_assets(&rules, &assets)?;
     Ok(Loaded {
-        assets: AssetRoot {
-            root: plugin_root.join(&init.config.assets_dir),
-            asset_url: init.config.asset_url.clone(),
-        },
         host: init.config.clone(),
         rules,
+        assets,
     })
+}
+
+fn preload_assets(rules: &Rules, assets: &AssetRoot) -> Result<(), ConfigError> {
+    let mut effects = Vec::new();
+    for command in &rules.commands {
+        effects.extend(&command.steps);
+    }
+    for action in &rules.mod_actions {
+        effects.extend(&action.steps);
+        effects.extend(action.combo.as_ref().map(|combo| &combo.effect));
+    }
+    effects.extend(rules.chat_combos.iter().map(|combo| &combo.effect));
+    effects.extend(rules.counters.iter().map(|counter| &counter.effect));
+    for trigger in &rules.event_triggers {
+        effects.extend(&trigger.steps);
+    }
+    for effect in effects {
+        assets.public_url("image", effect.image.as_deref())?;
+        assets.public_url("sound", effect.sound.as_deref())?;
+    }
+    Ok(())
+}
+
+fn valid_asset(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
 }
 
 fn validate(rules: &Rules, path: &Path) -> Result<(), ConfigError> {
