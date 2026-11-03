@@ -360,4 +360,26 @@ mod tests {
         kick.platform = Platform::Kick;
         assert_eq!(output(&mut engine, kick).len(), 1);
     }
+
+    #[test]
+    fn command_parser_is_anchored_and_preserves_unicode_arguments() {
+        assert!(parse_command(" !hola").is_none());
+        assert_eq!(
+            parse_command("!MuErTeS+  Ána  dos  ").unwrap(),
+            ("muertes+".into(), "Ána  dos")
+        );
+        assert!(parse_command("!").is_none());
+    }
+
+    #[test]
+    fn canonical_roles_include_everyone_vip_and_subscriber() {
+        let vip = chat("x", &["vip"]);
+        let subscriber = chat("x", &["subscriber"]);
+        assert!(role_allowed(&[crate::model::Role::Everyone], &vip.user));
+        assert!(role_allowed(&[crate::model::Role::Vip], &vip.user));
+        assert!(role_allowed(
+            &[crate::model::Role::Subscriber],
+            &subscriber.user
+        ));
+    }
 }
