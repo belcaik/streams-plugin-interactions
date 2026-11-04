@@ -208,4 +208,66 @@ mod tests {
         let restarted = CounterStore::load(&directory, &rules).unwrap();
         assert_eq!(restarted.get("muertes"), Some(7));
     }
+
+    #[test]
+    fn unknown_keys_are_preserved_and_missing_rules_get_initial() {
+        let directory = directory();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("counters.json"),
+            r#"{"version":1,"values":{"retirado":4}}"#,
+        )
+        .unwrap();
+        let mut store = CounterStore::load(&directory, &[rule("muertes", 2)]).unwrap();
+        assert_eq!(store.get("muertes"), Some(2));
+        store.set_and_save("muertes", 3).unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("counters.json")).unwrap(),
+            r#"{"version":1,"values":{"muertes":3,"retirado":4}}"#
+        );
+    }
+
+    #[test]
+    fn broken_unknown_version_and_out_of_range_files_fail_clearly() {
+        for (contents, expected) in [
+            ("{\"version\":1,", "JSON inválido"),
+            (r#"{"version":2,"values":{}}"#, "versión 2 no compatible"),
+            (
+                r#"{"version":1,"values":{"muertes":9223372036854775808}}"#,
+                "JSON inválido",
+            ),
+            (r#"{"version":1,"values":{"muertes":1.5}}"#, "JSON inválido"),
+        ] {
+            let directory = directory();
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("counters.json"), contents).unwrap();
+            let error = CounterStore::load(&directory, &[rule("muertes", 0)]).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("counters.json"), "{message}");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn failed_write_keeps_previous_value_in_memory_and_disk() {
+        let directory = directory();
+        let rules = [rule("muertes", 0)];
+        let mut store = CounterStore::load(&directory, &rules).unwrap();
+        store.set_and_save("muertes", 1).unwrap();
+        fs::create_dir_all(directory.join("counters.json.tmp")).unwrap();
+        let error = store.set_and_save("muertes", 2).unwrap_err();
+        assert!(error.to_string().contains("no se pudo guardar"));
+        assert_eq!(store.get("muertes"), Some(1));
+        let restarted = CounterStore::load(&directory, &rules).unwrap();
+        assert_eq!(restarted.get("muertes"), Some(1));
+    }
+
+    #[test]
+    fn unreadable_data_dir_fails_clearly() {
+        let directory = directory();
+        fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        fs::write(&directory, "no es un directorio").unwrap();
+        let error = CounterStore::load(&directory, &[]).unwrap_err();
+        assert!(error.to_string().contains("data_dir"));
+    }
 }
