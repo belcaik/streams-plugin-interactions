@@ -8,15 +8,17 @@ use crate::{
     clock::Clock,
     config::{AssetRoot, ConfigError, Loaded},
     model::{
-        ActionSet, CommandRule, Effect, EmissionContext, ExecutionContext, FreeEmission,
-        InputEvent, InputUser, Platform, Presentation,
+        ActionSet, CommandRule, CounterPresentation, CounterRule, Effect, EmissionContext,
+        ExecutionContext, FreeEmission, InputEvent, InputUser, Platform, Presentation,
     },
-    protocol::{write_emit, write_show},
+    persistence::{CounterStore, PersistenceError},
+    protocol::{write_counter, write_emit, write_show},
 };
 
 #[derive(Debug)]
 pub enum EngineError {
     Config(ConfigError),
+    Persistence(PersistenceError),
     Io(io::Error),
 }
 
@@ -24,6 +26,7 @@ impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(error) => error.fmt(f),
+            Self::Persistence(error) => error.fmt(f),
             Self::Io(error) => error.fmt(f),
         }
     }
@@ -34,6 +37,12 @@ impl Error for EngineError {}
 impl From<ConfigError> for EngineError {
     fn from(value: ConfigError) -> Self {
         Self::Config(value)
+    }
+}
+
+impl From<PersistenceError> for EngineError {
+    fn from(value: PersistenceError) -> Self {
+        Self::Persistence(value)
     }
 }
 
@@ -62,10 +71,11 @@ pub struct Engine<C: Clock> {
     user_cooldowns: std::collections::HashMap<(String, Platform, String), u64>,
     mod_trackers: std::collections::HashMap<(Platform, String), Vec<(String, u64)>>,
     chat_trackers: ChatTrackers,
+    counters: CounterStore,
 }
 
 impl<C: Clock> Engine<C> {
-    pub fn new(loaded: Loaded, clock: C) -> Self {
+    pub fn new(loaded: Loaded, counters: CounterStore, clock: C) -> Self {
         Self {
             loaded,
             clock,
@@ -74,6 +84,7 @@ impl<C: Clock> Engine<C> {
             user_cooldowns: std::collections::HashMap::new(),
             mod_trackers: std::collections::HashMap::new(),
             chat_trackers: std::collections::HashMap::new(),
+            counters,
         }
     }
 
@@ -143,6 +154,8 @@ impl<C: Clock> Engine<C> {
                     self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
                     self.track_mod(&rule, &command, args, &event, out)?;
                 }
+            } else if let Some(rule) = self.find_counter(&command) {
+                self.run_counter(&rule, &command, args, &event, out)?;
             }
         }
         self.track_chat(&message, &event, out)
@@ -194,6 +207,65 @@ impl<C: Clock> Engine<C> {
             .iter()
             .find(|rule| rule.name == command || rule.aliases.iter().any(|alias| alias == command))
             .cloned()
+    }
+
+    fn find_counter(&self, command: &str) -> Option<CounterRule> {
+        self.loaded
+            .rules
+            .counters
+            .iter()
+            .find(|rule| {
+                rule.show_command == command
+                    || rule.increment_command == command
+                    || rule.decrement_command.as_deref() == Some(command)
+            })
+            .cloned()
+    }
+
+    fn run_counter(
+        &mut self,
+        rule: &CounterRule,
+        command: &str,
+        args: &str,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let current = self.counters.get(&rule.name).unwrap_or(rule.initial);
+        let delta = if command == rule.increment_command {
+            1
+        } else if rule.decrement_command.as_deref() == Some(command) {
+            -1
+        } else {
+            0
+        };
+        let value = if delta == 0 {
+            current
+        } else {
+            if !role_allowed(&rule.mutation_roles, &event.user) {
+                return Ok(());
+            }
+            let value = current.saturating_add(delta).clamp(rule.min, rule.max);
+            self.counters.set_and_save(&rule.name, value)?;
+            value
+        };
+        let context = ExecutionContext {
+            source: "counter".into(),
+            rule: rule.name.clone(),
+            command: command.into(),
+            args: args.into(),
+            count: self.next_count(&rule.name),
+            platform: event.platform,
+            user: event.user.clone(),
+        };
+        let presentation = counter_presentation(
+            &self.loaded.assets,
+            &context,
+            rule,
+            value,
+            self.loaded.host.default_duration_ms,
+        )?;
+        write_counter(out, &presentation, &event.user)?;
+        Ok(())
     }
 
     fn run_actions(
@@ -473,6 +545,31 @@ pub fn effect_presentation(
     })
 }
 
+pub fn counter_presentation(
+    assets: &AssetRoot,
+    context: &ExecutionContext,
+    rule: &CounterRule,
+    value: i64,
+    default_duration_ms: u64,
+) -> Result<CounterPresentation, ConfigError> {
+    let effect = &rule.effect;
+    Ok(CounterPresentation {
+        schema: 1,
+        rule: rule.name.clone(),
+        name: rule.name.clone(),
+        value,
+        text: effect.text.as_ref().map(|text| {
+            render(text, context, None)
+                .replace("{name}", &rule.name)
+                .replace("{value}", &value.to_string())
+        }),
+        image: assets.public_url("image", effect.image.as_deref())?,
+        sound: assets.public_url("sound", effect.sound.as_deref())?,
+        variant: effect.variant.clone(),
+        duration_ms: effect.duration_ms.unwrap_or(default_duration_ms),
+    })
+}
+
 pub fn emit_actions(
     actions: &[crate::model::EmitAction],
     context: &ExecutionContext,
@@ -537,15 +634,18 @@ mod tests {
         fs::create_dir_all(root.join("config")).unwrap();
         fs::create_dir_all(root.join("overlay/assets")).unwrap();
         fs::write(root.join("config/interactions.toml"), rules).unwrap();
+        engine_at(&root)
+    }
+
+    fn engine_at(root: &std::path::Path) -> Engine<ManualClock> {
         let init = Init {
             event_type: "init".into(),
             config: HostConfig::default(),
             data_dir: root.join("data"),
         };
-        Engine::new(
-            crate::config::load(&init, &root).unwrap(),
-            ManualClock::new(0),
-        )
+        let loaded = crate::config::load(&init, root).unwrap();
+        let counters = CounterStore::load(&init.data_dir, &loaded.rules.counters).unwrap();
+        Engine::new(loaded, counters, ManualClock::new(0))
     }
 
     fn chat(message: &str, roles: &[&str]) -> InputEvent {
@@ -720,5 +820,18 @@ mod tests {
         let mut third = chat("POG", &[]);
         third.user.id = "u3".into();
         assert!(output(&mut engine, third).is_empty());
+    }
+
+    const COUNTER: &str = "[[counters]]\nname='muertes'\nshow_command='muertes'\nincrement_command='muertes+'\ndecrement_command='muertes-'\ninitial=0\nmin=0\nmax=2\ntext='{name}: {value}'\nvariant='counter'";
+
+    #[test]
+    fn counter_reads_publicly_and_persists_mutations() {
+        let mut engine = engine(COUNTER);
+        let read = output(&mut engine, chat("!muertes", &[]));
+        assert_eq!(read[0]["type"], "interaction_counter");
+        assert_eq!(read[0]["data"]["text"], "muertes: 0");
+        let increment = output(&mut engine, chat("!muertes+", &["moderator"]));
+        assert_eq!(increment[0]["data"]["value"], 1);
+        assert_eq!(engine.counters.get("muertes"), Some(1));
     }
 }

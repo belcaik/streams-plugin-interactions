@@ -2,6 +2,7 @@ pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod model;
+pub mod persistence;
 pub mod protocol;
 
 use std::{
@@ -13,6 +14,7 @@ use std::{
 use crate::{
     clock::{Clock, SystemClock},
     engine::{Engine, EngineError},
+    persistence::CounterStore,
     protocol::{parse_event, read_init},
 };
 
@@ -24,7 +26,8 @@ fn run(
 ) -> Result<(), Box<dyn Error>> {
     let init = read_init(reader)?;
     let loaded = config::load(&init, plugin_root)?;
-    let mut engine = Engine::new(loaded, clock);
+    let counters = CounterStore::load(&init.data_dir, &loaded.rules.counters)?;
+    let mut engine = Engine::new(loaded, counters, clock);
     for line in reader.lines() {
         let line = line?;
         let event = match parse_event(&line) {
@@ -35,8 +38,9 @@ fn run(
             }
         };
         match engine.handle(event, writer) {
-            Ok(()) | Err(EngineError::Config(_)) => {}
+            Ok(()) => {}
             Err(EngineError::Io(error)) => return Err(error.into()),
+            Err(error) => eprintln!("{error}"),
         }
     }
     Ok(())

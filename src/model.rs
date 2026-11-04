@@ -3,11 +3,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-// Puente solo para pruebas hasta que main.rs declare el módulo.
-#[cfg(test)]
-#[path = "persistence.rs"]
-mod persistence;
-
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Init {
     #[serde(rename = "type")]
