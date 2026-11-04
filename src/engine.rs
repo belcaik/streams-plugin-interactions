@@ -679,4 +679,46 @@ mod tests {
         third.user.id = "c".into();
         assert_eq!(output(&mut engine, third).len(), 1);
     }
+
+    #[test]
+    fn chat_tokens_trim_punctuation_normalize_and_dedupe() {
+        assert_eq!(
+            tokens("!POG pog, Ánima! x", 2, false),
+            vec![
+                ("pog".into(), "pog".into()),
+                ("Ánima".into(), "Ánima".into())
+            ]
+        );
+        assert_eq!(tokens("POG pog", 1, true).len(), 2);
+    }
+
+    #[test]
+    fn chat_combo_counts_new_users_and_increments_after_threshold() {
+        let mut engine = engine(
+            "[[chat_combos]]\nname='c'\nthreshold=2\nwindow_ms=1000\nmin_token_length=2\ntext='x{count} {key}'",
+        );
+        assert!(output(&mut engine, chat("POG pog POG!", &[])).is_empty());
+        let mut second = chat("pog,", &[]);
+        second.user.id = "u2".into();
+        assert_eq!(output(&mut engine, second)[0]["data"]["text"], "x2 pog");
+        let mut third = chat("POG", &[]);
+        third.user.id = "u3".into();
+        assert_eq!(output(&mut engine, third)[0]["data"]["text"], "x3 POG");
+    }
+
+    #[test]
+    fn chat_combo_honors_prefixes_expiry_and_platform() {
+        let mut engine = engine(
+            "[[chat_combos]]\nname='c'\nthreshold=2\nwindow_ms=1000\nignore_prefixes=['!']\ntext='x{count}'",
+        );
+        assert!(output(&mut engine, chat("!POG", &[])).is_empty());
+        let mut second = chat("POG", &[]);
+        second.user.id = "u2".into();
+        second.platform = Platform::Kick;
+        assert!(output(&mut engine, second).is_empty());
+        engine.clock.advance(1001);
+        let mut third = chat("POG", &[]);
+        third.user.id = "u3".into();
+        assert!(output(&mut engine, third).is_empty());
+    }
 }
