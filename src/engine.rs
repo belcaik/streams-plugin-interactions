@@ -626,6 +626,10 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn engine(rules: &str) -> Engine<ManualClock> {
+        engine_at(&root(rules))
+    }
+
+    fn root(rules: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "interactions-engine-{}-{}",
             std::process::id(),
@@ -634,7 +638,7 @@ mod tests {
         fs::create_dir_all(root.join("config")).unwrap();
         fs::create_dir_all(root.join("overlay/assets")).unwrap();
         fs::write(root.join("config/interactions.toml"), rules).unwrap();
-        engine_at(&root)
+        root
     }
 
     fn engine_at(root: &std::path::Path) -> Engine<ManualClock> {
@@ -833,5 +837,70 @@ mod tests {
         let increment = output(&mut engine, chat("!muertes+", &["moderator"]));
         assert_eq!(increment[0]["data"]["value"], 1);
         assert_eq!(engine.counters.get("muertes"), Some(1));
+    }
+
+    #[test]
+    fn counter_mutations_require_configured_roles() {
+        let mut engine = engine(COUNTER);
+        assert!(output(&mut engine, chat("!muertes+", &[])).is_empty());
+        assert!(output(&mut engine, chat("!muertes-", &["vip"])).is_empty());
+        assert_eq!(engine.counters.get("muertes"), Some(0));
+        let accepted = output(&mut engine, chat("!muertes+", &["broadcaster"]));
+        assert_eq!(accepted[0]["data"]["value"], 1);
+    }
+
+    #[test]
+    fn counter_saturates_at_min_and_max() {
+        let mut engine = engine(COUNTER);
+        let lowered = output(&mut engine, chat("!muertes-", &["moderator"]));
+        assert_eq!(lowered[0]["data"]["value"], 0);
+        for _ in 0..3 {
+            output(&mut engine, chat("!muertes+", &["moderator"]));
+        }
+        let read = output(&mut engine, chat("!muertes", &[]));
+        assert_eq!(read[0]["data"]["value"], 2);
+    }
+
+    #[test]
+    fn counter_value_survives_restart() {
+        let root = root(COUNTER);
+        let mut first = engine_at(&root);
+        output(&mut first, chat("!muertes+", &["moderator"]));
+        drop(first);
+        let mut restarted = engine_at(&root);
+        let read = output(&mut restarted, chat("!muertes", &[]));
+        assert_eq!(read[0]["data"]["text"], "muertes: 1");
+        assert_eq!(
+            fs::read_to_string(root.join("data/counters.json")).unwrap(),
+            r#"{"version":1,"values":{"muertes":1}}"#
+        );
+    }
+
+    #[test]
+    fn counter_event_matches_contract_bytes() {
+        let mut engine = engine(
+            "[[counters]]\nname='muertes'\nshow_command='muertes'\nincrement_command='muertes+'\ninitial=6\ntext='Muertes: {value}'\nvariant='counter'\nduration_ms=3500",
+        );
+        let mut event = chat("!muertes+", &["moderator"]);
+        event.user.id = "mod1".into();
+        event.user.name = "Mod".into();
+        let mut out = Vec::new();
+        engine.handle(event, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "{\"type\":\"interaction_counter\",\"data\":{\"schema\":1,\"rule\":\"muertes\",\"name\":\"muertes\",\"value\":7,\"text\":\"Muertes: 7\",\"image\":null,\"sound\":null,\"variant\":\"counter\",\"duration_ms\":3500},\"user\":{\"id\":\"mod1\",\"name\":\"Mod\",\"roles\":[\"moderator\"]}}\n"
+        );
+    }
+
+    #[test]
+    fn failed_counter_write_emits_nothing() {
+        let root = root(COUNTER);
+        let mut engine = engine_at(&root);
+        fs::create_dir_all(root.join("data/counters.json.tmp")).unwrap();
+        let mut out = Vec::new();
+        let result = engine.handle(chat("!muertes+", &["moderator"]), &mut out);
+        assert!(matches!(result, Err(EngineError::Persistence(_))));
+        assert!(out.is_empty());
+        assert_eq!(engine.counters.get("muertes"), Some(0));
     }
 }
