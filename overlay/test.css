@@ -1,0 +1,84 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: system-ui, sans-serif;
+}
+
+.test-interactions {
+  display: grid;
+  grid-template-columns: minmax(16rem, 24rem) 1fr;
+  gap: 1.5rem;
+  min-height: 100vh;
+  padding: 1.5rem;
+}
+
+.test-interactions__controls {
+  align-self: start;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  background: #1e293b;
+}
+
+.test-interactions__controls label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.test-interactions__controls select,
+.test-interactions__controls button {
+  min-height: 2.5rem;
+  border: 1px solid #64748b;
+  border-radius: 0.4rem;
+  background: #334155;
+  color: inherit;
+  font: inherit;
+}
+
+.test-interactions__controls select {
+  width: 100%;
+  padding: 0.4rem;
+}
+
+.test-interactions__buttons {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.test-interactions__buttons button {
+  cursor: pointer;
+}
+
+.test-interactions__buttons button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.test-interactions__status {
+  min-height: 1.5rem;
+}
+
+.test-interactions__preview {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px dashed #475569;
+  border-radius: 0.75rem;
+  background: transparent;
+}
+
+@media (max-width: 50rem) {
+  .test-interactions {
+    grid-template-columns: 1fr;
+  }
+}
+
+.test-interactions__hint {
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
