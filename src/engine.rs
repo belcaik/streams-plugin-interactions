@@ -9,7 +9,8 @@ use crate::{
     config::{AssetRoot, ConfigError, Loaded},
     model::{
         ActionSet, CommandRule, CounterPresentation, CounterRule, Effect, EmissionContext,
-        ExecutionContext, FreeEmission, InputEvent, InputUser, Platform, Presentation,
+        EventTrigger, ExecutionContext, FreeEmission, InputEvent, InputUser, Platform,
+        Presentation, TriggerEvent,
     },
     persistence::{CounterStore, PersistenceError},
     protocol::{write_counter, write_emit, write_show},
@@ -89,9 +90,56 @@ impl<C: Clock> Engine<C> {
     }
 
     pub fn handle(&mut self, event: InputEvent, out: &mut impl Write) -> Result<(), EngineError> {
-        if event.kind != "chat" {
-            return Ok(());
+        match event.kind.as_str() {
+            "chat" => self.handle_chat(event, out),
+            "redemption" => self.handle_trigger(TriggerEvent::Redemption, &event, out),
+            "donation" => self.handle_trigger(TriggerEvent::Donation, &event, out),
+            _ => Ok(()),
         }
+    }
+
+    fn handle_trigger(
+        &mut self,
+        kind: TriggerEvent,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let (command, args) = match kind {
+            TriggerEvent::Redemption => (
+                text_field(event, "reward_title"),
+                text_field(event, "input"),
+            ),
+            TriggerEvent::Donation => ("donation", text_field(event, "message")),
+        };
+        let triggers: Vec<EventTrigger> = self
+            .loaded
+            .rules
+            .event_triggers
+            .iter()
+            .filter(|trigger| trigger.event == kind && trigger_matches(trigger, event))
+            .cloned()
+            .collect();
+        let (command, args) = (command.to_owned(), args.to_owned());
+        for trigger in &triggers {
+            self.run_actions(
+                ActionRequest {
+                    source: kind.as_str(),
+                    rule: &trigger.name,
+                    command: &command,
+                    args: &args,
+                    actions: ActionSet {
+                        steps: &trigger.steps,
+                        emits: &trigger.emits,
+                    },
+                },
+                event,
+                out,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn handle_chat(&mut self, event: InputEvent, out: &mut impl Write) -> Result<(), EngineError> {
         let Some(message) = event.data.get("message").and_then(|value| value.as_str()) else {
             return Ok(());
         };
@@ -594,6 +642,41 @@ pub fn emit_actions(
     Ok(())
 }
 
+fn text_field<'a>(event: &'a InputEvent, field: &str) -> &'a str {
+    event
+        .data
+        .get(field)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
+pub fn trigger_matches(trigger: &EventTrigger, event: &InputEvent) -> bool {
+    if !trigger.enabled || !platform_allowed(&trigger.platforms, event.platform) {
+        return false;
+    }
+    let data = &event.data;
+    let equals = |expected: &Option<String>, field: &str| {
+        expected.as_deref().is_none_or(|expected| {
+            data.get(field).and_then(|value| value.as_str()) == Some(expected)
+        })
+    };
+    match trigger.event {
+        TriggerEvent::Redemption => {
+            equals(&trigger.reward_id, "reward_id") && equals(&trigger.reward_title, "reward_title")
+        }
+        TriggerEvent::Donation => {
+            let Some(amount) = data.get("amount").and_then(|value| value.as_f64()) else {
+                return false;
+            };
+            let currency = data.get("currency").and_then(|value| value.as_str());
+            trigger.currency.as_deref().is_none_or(|expected| {
+                currency.is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+            }) && trigger.min_amount.is_none_or(|min| amount >= min)
+                && trigger.max_amount.is_none_or(|max| amount <= max)
+        }
+    }
+}
+
 pub fn platform_allowed(platforms: &[Platform], platform: Platform) -> bool {
     platforms.contains(&platform)
 }
@@ -902,5 +985,91 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Persistence(_))));
         assert!(out.is_empty());
         assert_eq!(engine.counters.get("muertes"), Some(0));
+    }
+
+    fn trigger_event(kind: &str, platform: Platform, data: Value) -> InputEvent {
+        InputEvent {
+            platform,
+            kind: kind.into(),
+            data,
+            user: InputUser {
+                id: "u9".into(),
+                name: "Eva".into(),
+                roles: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn redemption_trigger_renders_reward_input() {
+        let mut engine = engine(
+            "[[event_triggers]]\nname='hype'\nevent='redemption'\nplatforms=['twitch']\nreward_title='Hype'\n[[event_triggers.steps]]\ntext='{user} {command}: {args}'",
+        );
+        let events = output(
+            &mut engine,
+            trigger_event(
+                "redemption",
+                Platform::Twitch,
+                serde_json::json!({"reward_id":"r1","reward_title":"Hype","cost":100,"input":"ya"}),
+            ),
+        );
+        assert_eq!(events[0]["data"]["source"], "redemption");
+        assert_eq!(events[0]["data"]["text"], "Eva Hype: ya");
+    }
+
+    #[test]
+    fn redemption_matches_by_id_and_title_exactly() {
+        let mut engine = engine(
+            "[[event_triggers]]\nname='by-id'\nevent='redemption'\nreward_id='r1'\n[[event_triggers.steps]]\ntext='id'\n[[event_triggers]]\nname='by-title'\nevent='redemption'\nreward_title='Hype'\n[[event_triggers.steps]]\ntext='title'",
+        );
+        let redemption = |id: &str, title: &str| {
+            trigger_event(
+                "redemption",
+                Platform::Twitch,
+                serde_json::json!({"reward_id":id,"reward_title":title,"cost":1,"input":""}),
+            )
+        };
+        let both = output(&mut engine, redemption("r1", "Hype"));
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0]["data"]["rule"], "by-id");
+        assert_eq!(both[1]["data"]["rule"], "by-title");
+        assert_eq!(output(&mut engine, redemption("r2", "hype")).len(), 0);
+    }
+
+    #[test]
+    fn donation_matches_amount_range_and_currency() {
+        let mut engine = engine(
+            "[[event_triggers]]\nname='usd'\nevent='donation'\ncurrency='usd'\nmin_amount=5.0\nmax_amount=10.0\n[[event_triggers.steps]]\ntext='{args}'\n[[event_triggers.emits]]\nname='camera_move'",
+        );
+        let donation = |amount: f64, currency: &str| {
+            trigger_event(
+                "donation",
+                Platform::Youtube,
+                serde_json::json!({"amount":amount,"currency":currency,"message":"gracias"}),
+            )
+        };
+        let accepted = output(&mut engine, donation(10.0, "USD"));
+        assert_eq!(accepted[0]["data"]["text"], "gracias");
+        assert_eq!(accepted[1]["type"], "interaction_emit");
+        assert_eq!(accepted[1]["data"]["context"]["source"], "donation");
+        assert_eq!(accepted[1]["data"]["context"]["command"], "donation");
+        assert!(output(&mut engine, donation(4.99, "USD")).is_empty());
+        assert!(output(&mut engine, donation(10.01, "USD")).is_empty());
+        assert!(output(&mut engine, donation(7.0, "EUR")).is_empty());
+    }
+
+    #[test]
+    fn disabled_triggers_and_other_platforms_are_ignored() {
+        let mut engine = engine(
+            "[[event_triggers]]\nname='off'\nenabled=false\nevent='donation'\n[[event_triggers.steps]]\ntext='x'\n[[event_triggers]]\nname='twitch'\nevent='donation'\nplatforms=['twitch']\n[[event_triggers.steps]]\ntext='x'",
+        );
+        let donation = trigger_event(
+            "donation",
+            Platform::Youtube,
+            serde_json::json!({"amount":1.0,"currency":"USD","message":""}),
+        );
+        assert!(output(&mut engine, donation).is_empty());
+        let follow = trigger_event("follow", Platform::Twitch, serde_json::json!({}));
+        assert!(output(&mut engine, follow).is_empty());
     }
 }

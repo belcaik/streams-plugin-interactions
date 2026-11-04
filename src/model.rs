@@ -87,6 +87,15 @@ pub enum TriggerEvent {
     Donation,
 }
 
+impl TriggerEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Redemption => "redemption",
+            Self::Donation => "donation",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Rules {
