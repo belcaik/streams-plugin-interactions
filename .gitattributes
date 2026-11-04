@@ -1,0 +1,17 @@
+# Normaliza finales de línea a LF en todos los sistemas
+* text=auto eol=lf
+
+# Texto explícito
+*.svg text eol=lf
+
+# Binarios
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.ogg binary
+*.mp3 binary
+*.wav binary
+*.zip binary
