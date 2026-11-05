@@ -16,21 +16,20 @@ Los roles que entregan los tres adaptadores son `broadcaster`, `moderator`, `vip
 
 ## Instalación
 
-### Desde una release
+Añade el repositorio a `config.toml` de streams-tools para instalar el plugin cuando falte:
 
-Descarga el ZIP de tu sistema y descomprímelo en `plugins/`. Cada ZIP contiene la carpeta `interactions/` con `plugin.toml`, `config/`, `overlay/` y el ejecutable en `bin/`. Reinicia `streams-tools`.
-
-### Como submódulo
-
-```sh
-git submodule add -b main https://github.com/belcaik/streams-plugin-interactions plugins/interactions
-cd plugins/interactions
-cargo build --release --locked
-mkdir -p bin
-cp target/release/interactions bin/       # en Windows: interactions.exe
+```toml
+[plugins]
+install = ["https://github.com/belcaik/streams-plugin-interactions"]
 ```
 
-`bin/` está ignorado por Git. El host añade `.exe` en Windows automáticamente.
+También puedes instalarlo desde la línea de comandos:
+
+```sh
+streams-tools plugin add https://github.com/belcaik/streams-plugin-interactions
+```
+
+Ambos métodos descargan el ZIP apropiado para la plataforma y verifican su SHA-256. Para fijar la versión usa `https://github.com/belcaik/streams-plugin-interactions@v0.1.0`.
 
 ### OBS
 
@@ -51,15 +50,24 @@ interactions/
     └── assets/hype.svg       # assets referenciables desde las reglas
 ```
 
-## Tres archivos, tres responsabilidades
+## Configuración y estado
 
-- `plugin.toml`: lo lee el host. Declara permisos y `[config]`, que llega al worker en la línea `init` y al overlay como `./config.json`.
-- `config/interactions.toml`: las reglas. Sólo lo lee el worker al arrancar.
+- `plugin.toml`: contiene los defaults de fábrica y se reemplaza al actualizar; no lo edites.
+- `config/interactions.toml`: contiene las reglas incluidas en el paquete. No es almacenamiento persistente del usuario y se reemplaza al actualizar.
 - `data/interactions/counters.json`: estado mutable de los contadores, en el `data_dir` que asigna el host (`STREAMS_DATA_DIR`, por defecto `./data`). Nunca se guarda estado junto al plugin.
 
-**No hay recarga en caliente: después de editar `plugin.toml` o `config/interactions.toml` reinicia `streams-tools`.**
+Configura el plugin en el `config.toml` principal. El host hace deep merge de `[plugins.config.interactions]` sobre `[config]` del manifiesto; sólo necesitas declarar los overrides:
 
-Claves de `[config]` en `plugin.toml`:
+```toml
+[plugins.config.interactions]
+max_queue = 50
+gap_ms = 250
+rules_file = "/ruta/persistente/interactions.toml"
+```
+
+Para reglas propias, copia primero el `config/interactions.toml` incluido a una ruta persistente y reemplaza `rules_file` como en el ejemplo. Así una actualización no borra tus reglas. No hay recarga en caliente: reinicia streams-tools después de cambiar la configuración o las reglas.
+
+Defaults disponibles en `[config]` del manifiesto:
 
 | Clave | Default | Descripción |
 |---|---|---|
@@ -72,7 +80,7 @@ Claves de `[config]` en `plugin.toml`:
 
 ## Reglas
 
-El archivo incluido [`config/interactions.toml`](config/interactions.toml) es el ejemplo completo y la fuente de verdad. Los campos desconocidos invalidan la configuración y el worker termina con un error `ruta: campo X: motivo` antes de procesar el chat.
+El archivo incluido [`config/interactions.toml`](config/interactions.toml) es el ejemplo completo y la fuente de verdad del formato. Los campos desconocidos invalidan la configuración y el worker termina con un error `ruta: campo X: motivo` antes de procesar el chat.
 
 ### `[[commands]]`
 
@@ -292,7 +300,7 @@ El worker es un bucle síncrono sobre stdin, sin Tokio ni hilos: toda expiració
 ## Limitaciones
 
 - No escribe en el chat (no hay `chat_write`).
-- No hay recarga en caliente de `plugin.toml` ni de las reglas.
+- No hay recarga en caliente de la configuración principal ni de las reglas.
 - No hace peticiones de red.
 - No hay temporizadores persistentes ni cola persistente: la cola del overlay se pierde al recargar.
 - Cooldowns, conteos `{count}` y combos viven en memoria y se reinician con el worker; sólo los contadores persisten.
