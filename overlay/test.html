@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Prueba de Interactions</title>
+    <link rel="stylesheet" href="./test.css">
+  </head>
+  <body>
+    <main class="test-interactions">
+      <h1>Prueba de interacciones</h1>
+      <div class="test-interactions__controls">
+        <label for="platform">Plataforma del chat</label>
+        <select id="platform">
+          <option value="twitch">Twitch</option>
+          <option value="kick">Kick</option>
+          <option value="youtube">YouTube</option>
+        </select>
+        <div id="buttons" class="test-interactions__buttons"></div>
+        <p id="status" class="test-interactions__status" role="status"></p>
+        <p class="test-interactions__hint">Los canjes y donaciones usan Twitch y YouTube. Activa sus reglas en <code>config/interactions.toml</code> y reinicia streams-tools.</p>
+      </div>
+      <iframe class="test-interactions__preview" src="./" title="Vista previa del overlay"></iframe>
+    </main>
+    <script type="module">
+      const platform = document.querySelector("#platform");
+      const status = document.querySelector("#status");
+      const buttons = document.querySelector("#buttons");
+
+      const uid = (prefix) => `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+      const user = (name, roles, id = uid(name.toLowerCase())) => ({ id, name, roles });
+      const chat = (message, author) => ({ platform: platform.value, type: "chat", user: author, data: { message } });
+
+      const scenarios = [
+        ["!hola mundo (everyone)", () => [chat("!hola mundo", user("Viewer", []))]],
+        ["!hi (subscriber)", () => [chat("!hi", user("Sub", ["subscriber"]))]],
+        ["!hype (moderator)", () => [chat("!hype", user("Mod", ["moderator"]))]],
+        ["Combo de 3 mods", () => ["ModA", "ModB", "ModC"].map((name) => chat("!hype", user(name, ["moderator"])))],
+        ["!shoutout canal (broadcaster)", () => [chat("!shoutout canal", user("Streamer", ["broadcaster"]))]],
+        ["!countdown 60 (moderator)", () => [chat("!countdown 60", user("Mod", ["moderator"]))]],
+        ["Combo POGGERS", () => ["Ana", "Bea", "Cata", "Dani", "Eli"].map((name) => chat("POGGERS", user(name, [])))],
+        ["!muertes+ (moderator)", () => [chat("!muertes+", user("Mod", ["moderator"]))]],
+        ["!muertes (everyone)", () => [chat("!muertes", user("Viewer", []))]],
+        ["Canje Twitch", () => [{
+          platform: "twitch", type: "redemption", user: user("Viewer", []),
+          data: { reward_id: "test-hype", reward_title: "Hype", cost: 100, input: "¡vamos!" },
+        }]],
+        ["Donación YouTube", () => [{
+          platform: "youtube", type: "donation", user: user("Viewer", []),
+          data: { amount: 25, currency: "USD", message: "¡Gran stream!" },
+        }]],
+      ];
+
+      async function publish(event) {
+        const response = await fetch("/api/events", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: crypto.randomUUID(), ts: new Date().toISOString(), ...event }),
+        });
+        return response.ok;
+      }
+
+      for (const [label, build] of scenarios) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.addEventListener("click", async () => {
+          const events = build();
+          let accepted = 0;
+          button.disabled = true;
+          status.textContent = `${label}: enviando`;
+          for (const event of events) {
+            try {
+              if (await publish(event)) accepted += 1;
+            } catch (_) {
+              // Se refleja en el recuento final.
+            }
+          }
+          status.textContent = `${label}: ${accepted}/${events.length} aceptados`;
+          button.disabled = false;
+        });
+        buttons.append(button);
+      }
+    </script>
+  </body>
+</html>
