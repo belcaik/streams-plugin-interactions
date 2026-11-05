@@ -1,0 +1,164 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.st-interactions {
+  --st-interactions-font-family: system-ui, sans-serif;
+  --st-interactions-color: #fff;
+  --st-interactions-background: rgb(15 23 42 / 90%);
+  --st-interactions-accent: #ff3cac;
+  --st-interactions-width: min(36rem, 90vw);
+  --st-interactions-padding: 1.25rem;
+  --st-interactions-gap: 1rem;
+  --st-interactions-radius: 1rem;
+  --st-interactions-shadow: 0 1rem 2.5rem rgb(0 0 0 / 40%);
+  --st-interactions-text-size: 2rem;
+  --st-interactions-combo-size: 5rem;
+  --st-interactions-image-size: 8rem;
+  --st-interactions-enter-duration: 250ms;
+  --st-interactions-exit-duration: 300ms;
+  --st-interactions-enter-transform: translateY(1.5rem) scale(0.94);
+  --st-interactions-exit-transform: translateY(-1rem) scale(0.98);
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: 100vw;
+  height: 100vh;
+  color: var(--st-interactions-color);
+  font-family: var(--st-interactions-font-family);
+  pointer-events: none;
+}
+
+.st-interactions__effect {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--st-interactions-gap);
+  max-width: var(--st-interactions-width);
+  padding: var(--st-interactions-padding);
+  border: 2px solid var(--st-interactions-accent);
+  border-radius: var(--st-interactions-radius);
+  background: var(--st-interactions-background);
+  box-shadow: var(--st-interactions-shadow);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.st-interactions__image {
+  display: block;
+  width: var(--st-interactions-image-size);
+  height: var(--st-interactions-image-size);
+  object-fit: contain;
+}
+
+.st-interactions__text {
+  margin: 0;
+  font-size: var(--st-interactions-text-size);
+  font-weight: 800;
+  line-height: 1.15;
+  white-space: pre-wrap;
+}
+
+.st-interactions__meta {
+  margin: 0;
+  color: var(--st-interactions-accent);
+  font-size: calc(var(--st-interactions-text-size) * 0.6);
+  font-weight: 700;
+}
+
+/* El metadato solo se ve cuando la regla no define texto. */
+.st-interactions__text + .st-interactions__meta {
+  display: none;
+}
+
+.st-interactions__effect--fullscreen {
+  position: fixed;
+  inset: 0;
+  justify-content: center;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: radial-gradient(circle, color-mix(in srgb, var(--st-interactions-accent) 35%, transparent), transparent 70%);
+  box-shadow: none;
+}
+
+.st-interactions__effect--fullscreen .st-interactions__image {
+  width: calc(var(--st-interactions-image-size) * 2.5);
+  height: calc(var(--st-interactions-image-size) * 2.5);
+  animation: st-interactions-hype 900ms ease-in-out infinite alternate;
+}
+
+.st-interactions__effect--fullscreen .st-interactions__text {
+  font-size: calc(var(--st-interactions-text-size) * 1.75);
+  text-shadow: 0 0.2rem 1rem rgb(0 0 0 / 60%);
+}
+
+.st-interactions__effect--combo {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.st-interactions__effect--combo .st-interactions__text {
+  color: var(--st-interactions-accent);
+  font-size: var(--st-interactions-combo-size);
+  font-weight: 900;
+  text-shadow: 0 0.25rem 1.25rem rgb(0 0 0 / 55%);
+  animation: st-interactions-pulse 600ms ease-in-out infinite alternate;
+}
+
+.st-interactions__effect--counter {
+  position: fixed;
+  right: var(--st-interactions-padding);
+  bottom: var(--st-interactions-padding);
+  flex-direction: row;
+}
+
+.st-interactions__effect--entering {
+  opacity: 0;
+  transform: var(--st-interactions-enter-transform);
+}
+
+.st-interactions__effect--visible {
+  opacity: 1;
+  transform: none;
+  transition: opacity var(--st-interactions-enter-duration), transform var(--st-interactions-enter-duration);
+}
+
+.st-interactions__effect--leaving {
+  opacity: 0;
+  transform: var(--st-interactions-exit-transform);
+  transition: opacity var(--st-interactions-exit-duration), transform var(--st-interactions-exit-duration);
+}
+
+@keyframes st-interactions-hype {
+  from { transform: scale(0.92) rotate(-4deg); }
+  to { transform: scale(1.08) rotate(4deg); }
+}
+
+@keyframes st-interactions-pulse {
+  from { transform: scale(1); }
+  to { transform: scale(1.12); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .st-interactions {
+    --st-interactions-enter-duration: 0ms;
+    --st-interactions-exit-duration: 0ms;
+  }
+
+  .st-interactions__effect,
+  .st-interactions__image,
+  .st-interactions__text {
+    animation: none;
+  }
+}
