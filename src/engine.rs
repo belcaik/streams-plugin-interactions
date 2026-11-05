@@ -43,12 +43,21 @@ impl From<io::Error> for EngineError {
     }
 }
 
+struct ActionRequest<'a> {
+    source: &'a str,
+    rule: &'a str,
+    command: &'a str,
+    args: &'a str,
+    actions: ActionSet<'a>,
+}
+
 pub struct Engine<C: Clock> {
     loaded: Loaded,
     clock: C,
     executions: std::collections::HashMap<String, u64>,
     global_cooldowns: std::collections::HashMap<String, u64>,
     user_cooldowns: std::collections::HashMap<(String, Platform, String), u64>,
+    mod_trackers: std::collections::HashMap<(Platform, String), Vec<(String, u64)>>,
 }
 
 impl<C: Clock> Engine<C> {
@@ -59,6 +68,7 @@ impl<C: Clock> Engine<C> {
             executions: std::collections::HashMap::new(),
             global_cooldowns: std::collections::HashMap::new(),
             user_cooldowns: std::collections::HashMap::new(),
+            mod_trackers: std::collections::HashMap::new(),
         }
     }
 
@@ -72,60 +82,99 @@ impl<C: Clock> Engine<C> {
         let Some((command, args)) = parse_command(message) else {
             return Ok(());
         };
-        let Some(rule) = self.find_command(&command) else {
-            return Ok(());
-        };
-        if !platform_allowed(&rule.platforms, event.platform)
-            || !role_allowed(&rule.roles, &event.user)
-            || !self.cooldown_allowed(&rule, &event)
-        {
+        if let Some(rule) = self.find_command(&command) {
+            if !platform_allowed(&rule.platforms, event.platform)
+                || !role_allowed(&rule.roles, &event.user)
+                || !self.cooldown_allowed(
+                    &rule.name,
+                    rule.global_cooldown_ms,
+                    rule.user_cooldown_ms,
+                    &event,
+                )
+            {
+                return Ok(());
+            }
+            self.run_actions(
+                ActionRequest {
+                    source: "command",
+                    rule: &rule.name,
+                    command: &command,
+                    args,
+                    actions: ActionSet {
+                        steps: &rule.steps,
+                        emits: &rule.emits,
+                    },
+                },
+                &event,
+                out,
+            )?;
+            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
             return Ok(());
         }
-        let count = self.next_count(&rule.name);
-        let context = ExecutionContext {
-            source: "command".into(),
-            rule: rule.name.clone(),
-            command,
-            args: args.into(),
-            count,
-            platform: event.platform,
-            user: event.user,
-        };
-        let actions = ActionSet {
-            steps: &rule.steps,
-            emits: &rule.emits,
-        };
-        let user_id = context.user.id.clone();
-        self.execute(actions, context, out)?;
-        self.record_cooldown(&rule, event.platform, user_id);
+        if let Some(rule) = self.find_mod(&command) {
+            let roles = [
+                crate::model::Role::Moderator,
+                crate::model::Role::Broadcaster,
+            ];
+            if !platform_allowed(&rule.platforms, event.platform)
+                || !role_allowed(&roles, &event.user)
+                || !self.cooldown_allowed(
+                    &rule.name,
+                    rule.global_cooldown_ms,
+                    rule.user_cooldown_ms,
+                    &event,
+                )
+            {
+                return Ok(());
+            }
+            self.run_actions(
+                ActionRequest {
+                    source: "mod_action",
+                    rule: &rule.name,
+                    command: &command,
+                    args,
+                    actions: ActionSet {
+                        steps: &rule.steps,
+                        emits: &rule.emits,
+                    },
+                },
+                &event,
+                out,
+            )?;
+            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
+            self.track_mod(&rule, &command, args, &event, out)?;
+        }
         Ok(())
     }
 
-    fn cooldown_allowed(&mut self, rule: &CommandRule, event: &InputEvent) -> bool {
+    fn cooldown_allowed(
+        &mut self,
+        name: &str,
+        global_ms: u64,
+        user_ms: u64,
+        event: &InputEvent,
+    ) -> bool {
         let now = self.clock.now_ms();
-        self.global_cooldowns.retain(|name, at| {
-            name != &rule.name || now.saturating_sub(*at) < rule.global_cooldown_ms
-        });
-        self.user_cooldowns.retain(|(name, _, _), at| {
-            name != &rule.name || now.saturating_sub(*at) < rule.user_cooldown_ms
-        });
-        let global = self.global_cooldowns.get(&rule.name).is_some_and(|at| {
-            rule.global_cooldown_ms > 0 && now.saturating_sub(*at) < rule.global_cooldown_ms
-        });
+        self.global_cooldowns
+            .retain(|key, at| key != name || now.saturating_sub(*at) < global_ms);
+        self.user_cooldowns
+            .retain(|(key, _, _), at| key != name || now.saturating_sub(*at) < user_ms);
+        let global = self
+            .global_cooldowns
+            .get(name)
+            .is_some_and(|at| global_ms > 0 && now.saturating_sub(*at) < global_ms);
         let user = self
             .user_cooldowns
-            .get(&(rule.name.clone(), event.platform, event.user.id.clone()))
-            .is_some_and(|at| {
-                rule.user_cooldown_ms > 0 && now.saturating_sub(*at) < rule.user_cooldown_ms
-            });
+            .get(&(name.into(), event.platform, event.user.id.clone()))
+            .is_some_and(|at| user_ms > 0 && now.saturating_sub(*at) < user_ms);
         !global && !user
     }
 
-    fn record_cooldown(&mut self, rule: &CommandRule, platform: Platform, user_id: String) {
+    fn record_cooldown(&mut self, name: &str, platform: Platform, user_id: String) {
         let now = self.clock.now_ms();
-        self.global_cooldowns.insert(rule.name.clone(), now);
+        self.global_cooldowns.insert(name.into(), now);
         self.user_cooldowns
-            .insert((rule.name.clone(), platform, user_id), now);
+            .insert((name.into(), platform, user_id), now);
     }
 
     fn find_command(&self, command: &str) -> Option<CommandRule> {
@@ -135,6 +184,101 @@ impl<C: Clock> Engine<C> {
             .iter()
             .find(|rule| rule.name == command || rule.aliases.iter().any(|alias| alias == command))
             .cloned()
+    }
+
+    fn find_mod(&self, command: &str) -> Option<crate::model::ModAction> {
+        self.loaded
+            .rules
+            .mod_actions
+            .iter()
+            .find(|rule| rule.name == command || rule.aliases.iter().any(|alias| alias == command))
+            .cloned()
+    }
+
+    fn run_actions(
+        &mut self,
+        request: ActionRequest<'_>,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let count = self.next_count(request.rule);
+        self.execute(
+            request.actions,
+            ExecutionContext {
+                source: request.source.into(),
+                rule: request.rule.into(),
+                command: request.command.into(),
+                args: request.args.into(),
+                count,
+                platform: event.platform,
+                user: event.user.clone(),
+            },
+            out,
+        )
+    }
+
+    fn track_mod(
+        &mut self,
+        rule: &crate::model::ModAction,
+        command: &str,
+        args: &str,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let Some(combo) = &rule.combo else {
+            return Ok(());
+        };
+        let now = self.clock.now_ms();
+        let tracker = self
+            .mod_trackers
+            .entry((event.platform, rule.name.clone()))
+            .or_default();
+        prune_mods(tracker, now, combo.window_ms);
+        if !tracker.iter().any(|(id, _)| id == &event.user.id) {
+            tracker.push((event.user.id.clone(), now));
+        }
+        if tracker.len() < combo.threshold as usize {
+            return Ok(());
+        }
+        let count = tracker.len() as u64;
+        let context = ExecutionContext {
+            source: "mod_action".into(),
+            rule: rule.name.clone(),
+            command: command.into(),
+            args: args.into(),
+            count,
+            platform: event.platform,
+            user: event.user.clone(),
+        };
+        let presentation = crate::model::ComboPresentation {
+            schema: 1,
+            kind: "moderators".into(),
+            rule: rule.name.clone(),
+            key: rule.name.clone(),
+            count,
+            threshold: combo.threshold,
+            text: combo
+                .effect
+                .text
+                .as_ref()
+                .map(|text| render(text, &context, None)),
+            image: self
+                .loaded
+                .assets
+                .public_url("image", combo.effect.image.as_deref())?,
+            sound: self
+                .loaded
+                .assets
+                .public_url("sound", combo.effect.sound.as_deref())?,
+            variant: combo.effect.variant.clone(),
+            duration_ms: combo
+                .effect
+                .duration_ms
+                .unwrap_or(self.loaded.host.default_duration_ms),
+        };
+        crate::protocol::write_combo(out, &presentation, &event.user)?;
+        tracker.clear();
+        Ok(())
     }
 
     fn next_count(&mut self, rule: &str) -> u64 {
@@ -162,6 +306,10 @@ impl<C: Clock> Engine<C> {
         emit_actions(actions.emits, &context, out)?;
         Ok(())
     }
+}
+
+pub fn prune_mods(entries: &mut Vec<(String, u64)>, now: u64, window_ms: u64) {
+    entries.retain(|(_, at)| now.saturating_sub(*at) < window_ms);
 }
 
 pub fn parse_command(message: &str) -> Option<(String, &str)> {
@@ -381,5 +529,42 @@ mod tests {
             &[crate::model::Role::Subscriber],
             &subscriber.user
         ));
+    }
+
+    #[test]
+    fn mod_combo_counts_unique_users_and_resets() {
+        let mut engine = engine(
+            "[[mod_actions]]\nname='hype'\n[[mod_actions.steps]]\ntext='{user}'\n[mod_actions.combo]\nthreshold=3\nwindow_ms=1000\ntext='x{count}'",
+        );
+        let moderator = |id: &str| {
+            let mut event = chat("!hype", &["moderator"]);
+            event.user.id = id.into();
+            event
+        };
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("b")).len(), 1);
+        let triggered = output(&mut engine, moderator("c"));
+        assert_eq!(triggered[1]["data"]["text"], "x3");
+        assert_eq!(output(&mut engine, moderator("a")).len(), 1);
+        assert_eq!(output(&mut engine, moderator("b")).len(), 1);
+    }
+
+    #[test]
+    fn mod_combo_expires_and_does_not_mix_platforms() {
+        let mut engine = engine(
+            "[[mod_actions]]\nname='hype'\n[[mod_actions.steps]]\ntext='x'\n[mod_actions.combo]\nthreshold=2\nwindow_ms=1000\ntext='x{count}'",
+        );
+        let mut first = chat("!hype", &["broadcaster"]);
+        first.user.id = "a".into();
+        assert_eq!(output(&mut engine, first).len(), 1);
+        let mut second = chat("!hype", &["moderator"]);
+        second.user.id = "b".into();
+        second.platform = Platform::Kick;
+        assert_eq!(output(&mut engine, second).len(), 1);
+        engine.clock.advance(1001);
+        let mut third = chat("!hype", &["moderator"]);
+        third.user.id = "c".into();
+        assert_eq!(output(&mut engine, third).len(), 1);
     }
 }
