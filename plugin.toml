@@ -1,5 +1,5 @@
 name = "interactions"
-version = "0.1.0"
+version = "0.1.1"
 description = "Chat commands, moderator combos, chat combos and persistent counters"
 
 [permissions]
