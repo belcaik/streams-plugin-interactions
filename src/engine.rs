@@ -47,6 +47,8 @@ pub struct Engine<C: Clock> {
     loaded: Loaded,
     clock: C,
     executions: std::collections::HashMap<String, u64>,
+    global_cooldowns: std::collections::HashMap<String, u64>,
+    user_cooldowns: std::collections::HashMap<(String, Platform, String), u64>,
 }
 
 impl<C: Clock> Engine<C> {
@@ -55,6 +57,8 @@ impl<C: Clock> Engine<C> {
             loaded,
             clock,
             executions: std::collections::HashMap::new(),
+            global_cooldowns: std::collections::HashMap::new(),
+            user_cooldowns: std::collections::HashMap::new(),
         }
     }
 
@@ -71,6 +75,12 @@ impl<C: Clock> Engine<C> {
         let Some(rule) = self.find_command(&command) else {
             return Ok(());
         };
+        if !platform_allowed(&rule.platforms, event.platform)
+            || !role_allowed(&rule.roles, &event.user)
+            || !self.cooldown_allowed(&rule, &event)
+        {
+            return Ok(());
+        }
         let count = self.next_count(&rule.name);
         let context = ExecutionContext {
             source: "command".into(),
@@ -85,7 +95,37 @@ impl<C: Clock> Engine<C> {
             steps: &rule.steps,
             emits: &rule.emits,
         };
-        self.execute(actions, context, out)
+        let user_id = context.user.id.clone();
+        self.execute(actions, context, out)?;
+        self.record_cooldown(&rule, event.platform, user_id);
+        Ok(())
+    }
+
+    fn cooldown_allowed(&mut self, rule: &CommandRule, event: &InputEvent) -> bool {
+        let now = self.clock.now_ms();
+        self.global_cooldowns.retain(|name, at| {
+            name != &rule.name || now.saturating_sub(*at) < rule.global_cooldown_ms
+        });
+        self.user_cooldowns.retain(|(name, _, _), at| {
+            name != &rule.name || now.saturating_sub(*at) < rule.user_cooldown_ms
+        });
+        let global = self.global_cooldowns.get(&rule.name).is_some_and(|at| {
+            rule.global_cooldown_ms > 0 && now.saturating_sub(*at) < rule.global_cooldown_ms
+        });
+        let user = self
+            .user_cooldowns
+            .get(&(rule.name.clone(), event.platform, event.user.id.clone()))
+            .is_some_and(|at| {
+                rule.user_cooldown_ms > 0 && now.saturating_sub(*at) < rule.user_cooldown_ms
+            });
+        !global && !user
+    }
+
+    fn record_cooldown(&mut self, rule: &CommandRule, platform: Platform, user_id: String) {
+        let now = self.clock.now_ms();
+        self.global_cooldowns.insert(rule.name.clone(), now);
+        self.user_cooldowns
+            .insert((rule.name.clone(), platform, user_id), now);
     }
 
     fn find_command(&self, command: &str) -> Option<CommandRule> {
@@ -109,7 +149,6 @@ impl<C: Clock> Engine<C> {
         context: ExecutionContext,
         out: &mut impl Write,
     ) -> Result<(), EngineError> {
-        let _ = self.clock.now_ms();
         for (step, effect) in actions.steps.iter().enumerate() {
             let presentation = effect_presentation(
                 &self.loaded.assets,
@@ -282,5 +321,65 @@ mod tests {
         assert_eq!(events[0]["data"]["text"], "Hola Ana: uno dos");
         assert_eq!(events[1]["data"]["step"], 1);
         assert_eq!(events[2]["data"]["name"], "camera_move");
+    }
+
+    #[test]
+    fn roles_and_platforms_are_checked_before_execution() {
+        let mut engine = engine(
+            "[[commands]]\nname='hype'\nroles=['moderator']\nplatforms=['kick']\n[[commands.steps]]\ntext='Hype'",
+        );
+        assert!(output(&mut engine, chat("!hype", &[])).is_empty());
+        assert!(output(&mut engine, chat("!hype", &["broadcaster"])).is_empty());
+        let mut allowed = chat("!hype", &["broadcaster"]);
+        allowed.platform = Platform::Kick;
+        assert_eq!(output(&mut engine, allowed).len(), 1);
+    }
+
+    #[test]
+    fn global_cooldown_uses_the_injected_clock() {
+        let mut engine = engine(
+            "[[commands]]\nname='x'\nglobal_cooldown_ms=1000\n[[commands.steps]]\ntext='{count}'",
+        );
+        assert_eq!(output(&mut engine, chat("!x", &[])).len(), 1);
+        assert!(output(&mut engine, chat("!x", &[])).is_empty());
+        engine.clock.advance(1000);
+        assert_eq!(output(&mut engine, chat("!x", &[]))[0]["data"]["text"], "2");
+    }
+
+    #[test]
+    fn user_cooldown_is_isolated_by_user_and_platform() {
+        let mut engine = engine(
+            "[[commands]]\nname='x'\nuser_cooldown_ms=1000\n[[commands.steps]]\ntext='{count}'",
+        );
+        assert_eq!(output(&mut engine, chat("!x", &[])).len(), 1);
+        assert!(output(&mut engine, chat("!x", &[])).is_empty());
+        let mut other = chat("!x", &[]);
+        other.user.id = "u2".into();
+        assert_eq!(output(&mut engine, other).len(), 1);
+        let mut kick = chat("!x", &[]);
+        kick.platform = Platform::Kick;
+        assert_eq!(output(&mut engine, kick).len(), 1);
+    }
+
+    #[test]
+    fn command_parser_is_anchored_and_preserves_unicode_arguments() {
+        assert!(parse_command(" !hola").is_none());
+        assert_eq!(
+            parse_command("!MuErTeS+  Ána  dos  ").unwrap(),
+            ("muertes+".into(), "Ána  dos")
+        );
+        assert!(parse_command("!").is_none());
+    }
+
+    #[test]
+    fn canonical_roles_include_everyone_vip_and_subscriber() {
+        let vip = chat("x", &["vip"]);
+        let subscriber = chat("x", &["subscriber"]);
+        assert!(role_allowed(&[crate::model::Role::Everyone], &vip.user));
+        assert!(role_allowed(&[crate::model::Role::Vip], &vip.user));
+        assert!(role_allowed(
+            &[crate::model::Role::Subscriber],
+            &subscriber.user
+        ));
     }
 }
