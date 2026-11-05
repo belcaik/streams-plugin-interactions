@@ -1,0 +1,18 @@
+name = "interactions"
+version = "0.1.0"
+description = "Chat commands, moderator combos, chat combos and persistent counters"
+
+[permissions]
+listens = ["chat", "redemption", "donation"]
+emits = ["interaction_show", "interaction_combo", "interaction_counter", "interaction_emit"]
+
+[worker]
+command = ["bin/interactions"]
+
+[config]
+rules_file = "config/interactions.toml"
+assets_dir = "overlay/assets"
+asset_url = "./assets/"
+max_queue = 30
+default_duration_ms = 4000
+gap_ms = 150
