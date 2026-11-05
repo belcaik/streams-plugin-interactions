@@ -43,6 +43,9 @@ impl From<io::Error> for EngineError {
     }
 }
 
+type ChatTrackers =
+    std::collections::HashMap<(Platform, String, String), Vec<(String, u64, String)>>;
+
 struct ActionRequest<'a> {
     source: &'a str,
     rule: &'a str,
@@ -58,6 +61,7 @@ pub struct Engine<C: Clock> {
     global_cooldowns: std::collections::HashMap<String, u64>,
     user_cooldowns: std::collections::HashMap<(String, Platform, String), u64>,
     mod_trackers: std::collections::HashMap<(Platform, String), Vec<(String, u64)>>,
+    chat_trackers: ChatTrackers,
 }
 
 impl<C: Clock> Engine<C> {
@@ -69,6 +73,7 @@ impl<C: Clock> Engine<C> {
             global_cooldowns: std::collections::HashMap::new(),
             user_cooldowns: std::collections::HashMap::new(),
             mod_trackers: std::collections::HashMap::new(),
+            chat_trackers: std::collections::HashMap::new(),
         }
     }
 
@@ -79,72 +84,68 @@ impl<C: Clock> Engine<C> {
         let Some(message) = event.data.get("message").and_then(|value| value.as_str()) else {
             return Ok(());
         };
-        let Some((command, args)) = parse_command(message) else {
-            return Ok(());
-        };
-        if let Some(rule) = self.find_command(&command) {
-            if !platform_allowed(&rule.platforms, event.platform)
-                || !role_allowed(&rule.roles, &event.user)
-                || !self.cooldown_allowed(
-                    &rule.name,
-                    rule.global_cooldown_ms,
-                    rule.user_cooldown_ms,
-                    &event,
-                )
-            {
-                return Ok(());
+        let message = message.to_owned();
+        if let Some((command, args)) = parse_command(&message) {
+            if let Some(rule) = self.find_command(&command) {
+                if platform_allowed(&rule.platforms, event.platform)
+                    && role_allowed(&rule.roles, &event.user)
+                    && self.cooldown_allowed(
+                        &rule.name,
+                        rule.global_cooldown_ms,
+                        rule.user_cooldown_ms,
+                        &event,
+                    )
+                {
+                    self.run_actions(
+                        ActionRequest {
+                            source: "command",
+                            rule: &rule.name,
+                            command: &command,
+                            args,
+                            actions: ActionSet {
+                                steps: &rule.steps,
+                                emits: &rule.emits,
+                            },
+                        },
+                        &event,
+                        out,
+                    )?;
+                    self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
+                }
+            } else if let Some(rule) = self.find_mod(&command) {
+                let roles = [
+                    crate::model::Role::Moderator,
+                    crate::model::Role::Broadcaster,
+                ];
+                if platform_allowed(&rule.platforms, event.platform)
+                    && role_allowed(&roles, &event.user)
+                    && self.cooldown_allowed(
+                        &rule.name,
+                        rule.global_cooldown_ms,
+                        rule.user_cooldown_ms,
+                        &event,
+                    )
+                {
+                    self.run_actions(
+                        ActionRequest {
+                            source: "mod_action",
+                            rule: &rule.name,
+                            command: &command,
+                            args,
+                            actions: ActionSet {
+                                steps: &rule.steps,
+                                emits: &rule.emits,
+                            },
+                        },
+                        &event,
+                        out,
+                    )?;
+                    self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
+                    self.track_mod(&rule, &command, args, &event, out)?;
+                }
             }
-            self.run_actions(
-                ActionRequest {
-                    source: "command",
-                    rule: &rule.name,
-                    command: &command,
-                    args,
-                    actions: ActionSet {
-                        steps: &rule.steps,
-                        emits: &rule.emits,
-                    },
-                },
-                &event,
-                out,
-            )?;
-            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
-            return Ok(());
         }
-        if let Some(rule) = self.find_mod(&command) {
-            let roles = [
-                crate::model::Role::Moderator,
-                crate::model::Role::Broadcaster,
-            ];
-            if !platform_allowed(&rule.platforms, event.platform)
-                || !role_allowed(&roles, &event.user)
-                || !self.cooldown_allowed(
-                    &rule.name,
-                    rule.global_cooldown_ms,
-                    rule.user_cooldown_ms,
-                    &event,
-                )
-            {
-                return Ok(());
-            }
-            self.run_actions(
-                ActionRequest {
-                    source: "mod_action",
-                    rule: &rule.name,
-                    command: &command,
-                    args,
-                    actions: ActionSet {
-                        steps: &rule.steps,
-                        emits: &rule.emits,
-                    },
-                },
-                &event,
-                out,
-            )?;
-            self.record_cooldown(&rule.name, event.platform, event.user.id.clone());
-            self.track_mod(&rule, &command, args, &event, out)?;
-        }
-        Ok(())
+        self.track_chat(&message, &event, out)
     }
 
     fn cooldown_allowed(
@@ -215,6 +216,95 @@ impl<C: Clock> Engine<C> {
             },
             out,
         )
+    }
+
+    fn track_chat(
+        &mut self,
+        message: &str,
+        event: &InputEvent,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        for index in 0..self.loaded.rules.chat_combos.len() {
+            let combo = self.loaded.rules.chat_combos[index].clone();
+            if !platform_allowed(&combo.platforms, event.platform)
+                || combo
+                    .ignore_prefixes
+                    .iter()
+                    .any(|prefix| message.starts_with(prefix))
+            {
+                continue;
+            }
+            for (normalized, visible) in
+                tokens(message, combo.min_token_length, combo.case_sensitive)
+            {
+                let now = self.clock.now_ms();
+                let tracker = self
+                    .chat_trackers
+                    .entry((event.platform, combo.name.clone(), normalized))
+                    .or_default();
+                prune_chat(tracker, now, combo.window_ms);
+                let is_new = !tracker.iter().any(|(id, _, _)| id == &event.user.id);
+                tracker.retain(|(id, _, _)| id != &event.user.id);
+                tracker.push((event.user.id.clone(), now, visible.clone()));
+                if is_new && tracker.len() >= combo.threshold as usize {
+                    let snapshot = tracker.clone();
+                    self.emit_chat_combo(&combo, &snapshot, event, message, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_chat_combo(
+        &self,
+        combo: &crate::model::ChatCombo,
+        tracker: &[(String, u64, String)],
+        event: &InputEvent,
+        message: &str,
+        out: &mut impl Write,
+    ) -> Result<(), EngineError> {
+        let count = tracker.len() as u64;
+        let key = tracker
+            .last()
+            .map(|entry| entry.2.clone())
+            .unwrap_or_default();
+        let context = ExecutionContext {
+            source: "chat".into(),
+            rule: combo.name.clone(),
+            command: combo.name.clone(),
+            args: message.into(),
+            count,
+            platform: event.platform,
+            user: event.user.clone(),
+        };
+        let presentation = crate::model::ComboPresentation {
+            schema: 1,
+            kind: "chat".into(),
+            rule: combo.name.clone(),
+            key: key.clone(),
+            count,
+            threshold: combo.threshold,
+            text: combo
+                .effect
+                .text
+                .as_ref()
+                .map(|text| render(text, &context, Some(&key))),
+            image: self
+                .loaded
+                .assets
+                .public_url("image", combo.effect.image.as_deref())?,
+            sound: self
+                .loaded
+                .assets
+                .public_url("sound", combo.effect.sound.as_deref())?,
+            variant: combo.effect.variant.clone(),
+            duration_ms: combo
+                .effect
+                .duration_ms
+                .unwrap_or(self.loaded.host.default_duration_ms),
+        };
+        crate::protocol::write_combo(out, &presentation, &event.user)?;
+        Ok(())
     }
 
     fn track_mod(
@@ -306,6 +396,28 @@ impl<C: Clock> Engine<C> {
         emit_actions(actions.emits, &context, out)?;
         Ok(())
     }
+}
+
+pub fn prune_chat(entries: &mut Vec<(String, u64, String)>, now: u64, window_ms: u64) {
+    entries.retain(|(_, at, _)| now.saturating_sub(*at) < window_ms);
+}
+
+pub fn tokens(message: &str, min_length: u64, case_sensitive: bool) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = Vec::new();
+    for visible in message
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| c.is_ascii_punctuation()))
+        .filter(|token| token.chars().count() >= min_length as usize && !token.is_empty())
+    {
+        let normalized = if case_sensitive {
+            visible.into()
+        } else {
+            visible.to_ascii_lowercase()
+        };
+        result.retain(|(token, _)| token != &normalized);
+        result.push((normalized, visible.into()));
+    }
+    result
 }
 
 pub fn prune_mods(entries: &mut Vec<(String, u64)>, now: u64, window_ms: u64) {
@@ -566,5 +678,47 @@ mod tests {
         let mut third = chat("!hype", &["moderator"]);
         third.user.id = "c".into();
         assert_eq!(output(&mut engine, third).len(), 1);
+    }
+
+    #[test]
+    fn chat_tokens_trim_punctuation_normalize_and_dedupe() {
+        assert_eq!(
+            tokens("!POG pog, Ánima! x", 2, false),
+            vec![
+                ("pog".into(), "pog".into()),
+                ("Ánima".into(), "Ánima".into())
+            ]
+        );
+        assert_eq!(tokens("POG pog", 1, true).len(), 2);
+    }
+
+    #[test]
+    fn chat_combo_counts_new_users_and_increments_after_threshold() {
+        let mut engine = engine(
+            "[[chat_combos]]\nname='c'\nthreshold=2\nwindow_ms=1000\nmin_token_length=2\ntext='x{count} {key}'",
+        );
+        assert!(output(&mut engine, chat("POG pog POG!", &[])).is_empty());
+        let mut second = chat("pog,", &[]);
+        second.user.id = "u2".into();
+        assert_eq!(output(&mut engine, second)[0]["data"]["text"], "x2 pog");
+        let mut third = chat("POG", &[]);
+        third.user.id = "u3".into();
+        assert_eq!(output(&mut engine, third)[0]["data"]["text"], "x3 POG");
+    }
+
+    #[test]
+    fn chat_combo_honors_prefixes_expiry_and_platform() {
+        let mut engine = engine(
+            "[[chat_combos]]\nname='c'\nthreshold=2\nwindow_ms=1000\nignore_prefixes=['!']\ntext='x{count}'",
+        );
+        assert!(output(&mut engine, chat("!POG", &[])).is_empty());
+        let mut second = chat("POG", &[]);
+        second.user.id = "u2".into();
+        second.platform = Platform::Kick;
+        assert!(output(&mut engine, second).is_empty());
+        engine.clock.advance(1001);
+        let mut third = chat("POG", &[]);
+        third.user.id = "u3".into();
+        assert!(output(&mut engine, third).is_empty());
     }
 }
