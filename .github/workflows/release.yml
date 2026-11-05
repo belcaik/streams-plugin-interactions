@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, executable: interactions }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, executable: interactions }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, executable: interactions.exe }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, executable: interactions }
+          - { runner: macos-15, target: aarch64-apple-darwin, executable: interactions }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - if: runner.os != 'Windows'
+        name: Preparar carpeta POSIX
+        shell: bash
+        run: |
+          mkdir -p dist/interactions/bin
+          cp plugin.toml README.md dist/interactions/
+          cp -R config overlay dist/interactions/
+          cp "target/${{ matrix.target }}/release/interactions" dist/interactions/bin/
+      - if: runner.os == 'Windows'
+        name: Preparar carpeta Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/interactions/bin | Out-Null
+          Copy-Item plugin.toml, README.md dist/interactions/
+          Copy-Item config, overlay dist/interactions/ -Recurse
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.executable }}" dist/interactions/bin/
+      - if: runner.os != 'Windows'
+        name: Verificar contenido POSIX
+        shell: bash
+        run: |
+          for file in plugin.toml README.md config/interactions.toml overlay/index.html overlay/style.css overlay/app.js overlay/interactions-core.js overlay/assets/hype.svg bin/interactions; do
+            test -f "dist/interactions/$file" || { echo "Falta $file"; exit 1; }
+          done
+      - if: runner.os == 'Windows'
+        name: Verificar contenido Windows
+        shell: pwsh
+        run: |
+          $files = 'plugin.toml', 'README.md', 'config/interactions.toml', 'overlay/index.html', 'overlay/style.css', 'overlay/app.js', 'overlay/interactions-core.js', 'overlay/assets/hype.svg', 'bin/interactions.exe'
+          foreach ($file in $files) {
+            if (-not (Test-Path "dist/interactions/$file" -PathType Leaf)) { throw "Falta $file" }
+          }
+      - if: runner.os != 'Windows'
+        name: Comprimir ZIP POSIX
+        shell: bash
+        run: cd dist && zip -r "interactions-${{ matrix.target }}.zip" interactions
+      - if: runner.os == 'Windows'
+        name: Comprimir ZIP Windows
+        shell: pwsh
+        run: Compress-Archive -Path dist/interactions -DestinationPath "dist/interactions-${{ matrix.target }}.zip" -Force
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.zip
+          fail_on_unmatched_files: true
